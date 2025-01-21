@@ -1,1150 +1,204 @@
-"""
-插件
-====
+"""本模块为 NoneBot 插件开发提供便携的定义函数。
 
-为 NoneBot 插件开发提供便携的定义函数。
+## 快捷导入
+
+为方便使用，本模块从子模块导入了部分内容，以下内容可以直接通过本模块导入:
+
+- `on` => {ref}``on` <nonebot.plugin.on.on>`
+- `on_metaevent` => {ref}``on_metaevent` <nonebot.plugin.on.on_metaevent>`
+- `on_message` => {ref}``on_message` <nonebot.plugin.on.on_message>`
+- `on_notice` => {ref}``on_notice` <nonebot.plugin.on.on_notice>`
+- `on_request` => {ref}``on_request` <nonebot.plugin.on.on_request>`
+- `on_startswith` => {ref}``on_startswith` <nonebot.plugin.on.on_startswith>`
+- `on_endswith` => {ref}``on_endswith` <nonebot.plugin.on.on_endswith>`
+- `on_fullmatch` => {ref}``on_fullmatch` <nonebot.plugin.on.on_fullmatch>`
+- `on_keyword` => {ref}``on_keyword` <nonebot.plugin.on.on_keyword>`
+- `on_command` => {ref}``on_command` <nonebot.plugin.on.on_command>`
+- `on_shell_command` => {ref}``on_shell_command` <nonebot.plugin.on.on_shell_command>`
+- `on_regex` => {ref}``on_regex` <nonebot.plugin.on.on_regex>`
+- `on_type` => {ref}``on_type` <nonebot.plugin.on.on_type>`
+- `CommandGroup` => {ref}``CommandGroup` <nonebot.plugin.on.CommandGroup>`
+- `Matchergroup` => {ref}``MatcherGroup` <nonebot.plugin.on.MatcherGroup>`
+- `load_plugin` => {ref}``load_plugin` <nonebot.plugin.load.load_plugin>`
+- `load_plugins` => {ref}``load_plugins` <nonebot.plugin.load.load_plugins>`
+- `load_all_plugins` => {ref}``load_all_plugins` <nonebot.plugin.load.load_all_plugins>`
+- `load_from_json` => {ref}``load_from_json` <nonebot.plugin.load.load_from_json>`
+- `load_from_toml` => {ref}``load_from_toml` <nonebot.plugin.load.load_from_toml>`
+- `load_builtin_plugin` =>
+  {ref}``load_builtin_plugin` <nonebot.plugin.load.load_builtin_plugin>`
+- `load_builtin_plugins` =>
+  {ref}``load_builtin_plugins` <nonebot.plugin.load.load_builtin_plugins>`
+- `require` => {ref}``require` <nonebot.plugin.load.require>`
+- `PluginMetadata` => {ref}``PluginMetadata` <nonebot.plugin.model.PluginMetadata>`
+
+FrontMatter:
+    mdx:
+        format: md
+    sidebar_position: 0
+    description: nonebot.plugin 模块
 """
-import re
-import json
+
+from contextvars import ContextVar
+from itertools import chain
 from types import ModuleType
-from dataclasses import dataclass
-from collections import defaultdict
-from contextvars import Context, copy_context
-from typing import (TYPE_CHECKING, Any, Set, Dict, List, Type, Tuple, Union,
-                    Optional)
-
-import tomlkit
-
-from nonebot.log import logger
-from nonebot.handler import Handler
-from nonebot.matcher import Matcher
-from nonebot.utils import escape_tag
-from nonebot.permission import Permission
-from nonebot.typing import T_State, T_Handler, T_RuleChecker, T_StateFactory
-from nonebot.rule import (Rule, ArgumentParser, regex, command, keyword,
-                          endswith, startswith, shell_command)
-
-from .export import Export
-from .export import export as export
-from .manager import PluginManager, _current_plugin
-
-if TYPE_CHECKING:
-    from nonebot.adapters import Bot, Event
-
-plugins: Dict[str, "Plugin"] = {}
-"""
-:类型: ``Dict[str, Plugin]``
-:说明: 已加载的插件
-"""
-PLUGIN_NAMESPACE = "nonebot.loaded_plugins"
-
-_plugin_matchers: Dict[str, Set[Type[Matcher]]] = defaultdict(set)
-
-
-@dataclass(eq=False)
-class Plugin(object):
-    """存储插件信息"""
-    name: str
-    """
-    - **类型**: ``str``
-    - **说明**: 插件名称，使用 文件/文件夹 名称作为插件名
-    """
-    module: ModuleType
-    """
-    - **类型**: ``ModuleType``
-    - **说明**: 插件模块对象
-    """
-
-    @property
-    def export(self) -> Export:
-        """
-        - **类型**: ``Export``
-        - **说明**: 插件内定义的导出内容
-        """
-        return getattr(self.module, "__export__", Export())
-
-    @property
-    def matcher(self) -> Set[Type[Matcher]]:
-        """
-        - **类型**: ``Set[Type[Matcher]]``
-        - **说明**: 插件内定义的 ``Matcher``
-        """
-        # return reduce(
-        #     lambda x, y: x | _plugin_matchers[y],
-        #     filter(lambda x: x.startswith(self.name), _plugin_matchers.keys()),
-        #     set())
-        return _plugin_matchers.get(self.name, set())
-
-
-def _store_matcher(matcher: Type[Matcher]):
-    if matcher.plugin_name:
-        _plugin_matchers[matcher.plugin_name].add(matcher)
-
-
-def on(type: str = "",
-       rule: Optional[Union[Rule, T_RuleChecker]] = None,
-       permission: Optional[Permission] = None,
-       *,
-       handlers: Optional[List[Union[T_Handler, Handler]]] = None,
-       temp: bool = False,
-       priority: int = 1,
-       block: bool = False,
-       state: Optional[T_State] = None,
-       state_factory: Optional[T_StateFactory] = None) -> Type[Matcher]:
-    """
-    :说明:
-
-      注册一个基础事件响应器，可自定义类型。
-
-    :参数:
-
-      * ``type: str``: 事件响应器类型
-      * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-      * ``permission: Optional[Permission]``: 事件响应权限
-      * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-      * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-      * ``priority: int``: 事件响应器优先级
-      * ``block: bool``: 是否阻止事件向更低优先级传递
-      * ``state: Optional[T_State]``: 默认 state
-      * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-    :返回:
-
-      - ``Type[Matcher]``
-    """
-    matcher = Matcher.new(type,
-                          Rule() & rule,
-                          permission or Permission(),
-                          temp=temp,
-                          priority=priority,
-                          block=block,
-                          handlers=handlers,
-                          module=_current_plugin.get(),
-                          default_state=state,
-                          default_state_factory=state_factory)
-    _store_matcher(matcher)
-    return matcher
-
-
-def on_metaevent(
-        rule: Optional[Union[Rule, T_RuleChecker]] = None,
-        *,
-        handlers: Optional[List[Union[T_Handler, Handler]]] = None,
-        temp: bool = False,
-        priority: int = 1,
-        block: bool = False,
-        state: Optional[T_State] = None,
-        state_factory: Optional[T_StateFactory] = None) -> Type[Matcher]:
-    """
-    :说明:
-
-      注册一个元事件响应器。
-
-    :参数:
-
-      * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-      * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-      * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-      * ``priority: int``: 事件响应器优先级
-      * ``block: bool``: 是否阻止事件向更低优先级传递
-      * ``state: Optional[T_State]``: 默认 state
-      * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-    :返回:
-
-      - ``Type[Matcher]``
-    """
-    matcher = Matcher.new("meta_event",
-                          Rule() & rule,
-                          Permission(),
-                          temp=temp,
-                          priority=priority,
-                          block=block,
-                          handlers=handlers,
-                          module=_current_plugin.get(),
-                          default_state=state,
-                          default_state_factory=state_factory)
-    _store_matcher(matcher)
-    return matcher
-
-
-def on_message(rule: Optional[Union[Rule, T_RuleChecker]] = None,
-               permission: Optional[Permission] = None,
-               *,
-               handlers: Optional[List[Union[T_Handler, Handler]]] = None,
-               temp: bool = False,
-               priority: int = 1,
-               block: bool = True,
-               state: Optional[T_State] = None,
-               state_factory: Optional[T_StateFactory] = None) -> Type[Matcher]:
-    """
-    :说明:
-
-      注册一个消息事件响应器。
-
-    :参数:
-
-      * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-      * ``permission: Optional[Permission]``: 事件响应权限
-      * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-      * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-      * ``priority: int``: 事件响应器优先级
-      * ``block: bool``: 是否阻止事件向更低优先级传递
-      * ``state: Optional[T_State]``: 默认 state
-      * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-    :返回:
-
-      - ``Type[Matcher]``
-    """
-    matcher = Matcher.new("message",
-                          Rule() & rule,
-                          permission or Permission(),
-                          temp=temp,
-                          priority=priority,
-                          block=block,
-                          handlers=handlers,
-                          module=_current_plugin.get(),
-                          default_state=state,
-                          default_state_factory=state_factory)
-    _store_matcher(matcher)
-    return matcher
-
-
-def on_notice(rule: Optional[Union[Rule, T_RuleChecker]] = None,
-              *,
-              handlers: Optional[List[Union[T_Handler, Handler]]] = None,
-              temp: bool = False,
-              priority: int = 1,
-              block: bool = False,
-              state: Optional[T_State] = None,
-              state_factory: Optional[T_StateFactory] = None) -> Type[Matcher]:
-    """
-    :说明:
-
-      注册一个通知事件响应器。
-
-    :参数:
-
-      * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-      * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-      * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-      * ``priority: int``: 事件响应器优先级
-      * ``block: bool``: 是否阻止事件向更低优先级传递
-      * ``state: Optional[T_State]``: 默认 state
-      * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-    :返回:
-
-      - ``Type[Matcher]``
-    """
-    matcher = Matcher.new("notice",
-                          Rule() & rule,
-                          Permission(),
-                          temp=temp,
-                          priority=priority,
-                          block=block,
-                          handlers=handlers,
-                          module=_current_plugin.get(),
-                          default_state=state,
-                          default_state_factory=state_factory)
-    _store_matcher(matcher)
-    return matcher
-
-
-def on_request(rule: Optional[Union[Rule, T_RuleChecker]] = None,
-               *,
-               handlers: Optional[List[Union[T_Handler, Handler]]] = None,
-               temp: bool = False,
-               priority: int = 1,
-               block: bool = False,
-               state: Optional[T_State] = None,
-               state_factory: Optional[T_StateFactory] = None) -> Type[Matcher]:
-    """
-    :说明:
-
-      注册一个请求事件响应器。
-
-    :参数:
-
-      * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-      * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-      * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-      * ``priority: int``: 事件响应器优先级
-      * ``block: bool``: 是否阻止事件向更低优先级传递
-      * ``state: Optional[T_State]``: 默认 state
-      * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-    :返回:
-
-      - ``Type[Matcher]``
-    """
-    matcher = Matcher.new("request",
-                          Rule() & rule,
-                          Permission(),
-                          temp=temp,
-                          priority=priority,
-                          block=block,
-                          handlers=handlers,
-                          module=_current_plugin.get(),
-                          default_state=state,
-                          default_state_factory=state_factory)
-    _store_matcher(matcher)
-    return matcher
-
-
-def on_startswith(msg: Union[str, Tuple[str, ...]],
-                  rule: Optional[Optional[Union[Rule, T_RuleChecker]]] = None,
-                  ignorecase: bool = False,
-                  **kwargs) -> Type[Matcher]:
-    """
-    :说明:
-
-      注册一个消息事件响应器，并且当消息的**文本部分**以指定内容开头时响应。
-
-    :参数:
-
-      * ``msg: Union[str, Tuple[str, ...]]``: 指定消息开头内容
-      * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-      * ``ignorecase: bool``: 是否忽略大小写
-      * ``permission: Optional[Permission]``: 事件响应权限
-      * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-      * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-      * ``priority: int``: 事件响应器优先级
-      * ``block: bool``: 是否阻止事件向更低优先级传递
-      * ``state: Optional[T_State]``: 默认 state
-      * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-    :返回:
-
-      - ``Type[Matcher]``
-    """
-    return on_message(startswith(msg, ignorecase) & rule, **kwargs)
-
-
-def on_endswith(msg: Union[str, Tuple[str, ...]],
-                rule: Optional[Optional[Union[Rule, T_RuleChecker]]] = None,
-                ignorecase: bool = False,
-                **kwargs) -> Type[Matcher]:
-    """
-    :说明:
-
-      注册一个消息事件响应器，并且当消息的**文本部分**以指定内容结尾时响应。
-
-    :参数:
-
-      * ``msg: Union[str, Tuple[str, ...]]``: 指定消息结尾内容
-      * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-      * ``ignorecase: bool``: 是否忽略大小写
-      * ``permission: Optional[Permission]``: 事件响应权限
-      * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-      * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-      * ``priority: int``: 事件响应器优先级
-      * ``block: bool``: 是否阻止事件向更低优先级传递
-      * ``state: Optional[T_State]``: 默认 state
-      * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-    :返回:
-
-      - ``Type[Matcher]``
-    """
-    return on_message(endswith(msg, ignorecase) & rule, **kwargs)
-
-
-def on_keyword(keywords: Set[str],
-               rule: Optional[Union[Rule, T_RuleChecker]] = None,
-               **kwargs) -> Type[Matcher]:
-    """
-    :说明:
-
-      注册一个消息事件响应器，并且当消息纯文本部分包含关键词时响应。
-
-    :参数:
-
-      * ``keywords: Set[str]``: 关键词列表
-      * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-      * ``permission: Optional[Permission]``: 事件响应权限
-      * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-      * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-      * ``priority: int``: 事件响应器优先级
-      * ``block: bool``: 是否阻止事件向更低优先级传递
-      * ``state: Optional[T_State]``: 默认 state
-      * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-    :返回:
-
-      - ``Type[Matcher]``
-    """
-    return on_message(keyword(*keywords) & rule, **kwargs)
-
-
-def on_command(cmd: Union[str, Tuple[str, ...]],
-               rule: Optional[Union[Rule, T_RuleChecker]] = None,
-               aliases: Optional[Set[Union[str, Tuple[str, ...]]]] = None,
-               **kwargs) -> Type[Matcher]:
-    """
-    :说明:
-
-      注册一个消息事件响应器，并且当消息以指定命令开头时响应。
-
-      命令匹配规则参考: `命令形式匹配 <rule.html#command-command>`_
-
-    :参数:
-
-      * ``cmd: Union[str, Tuple[str, ...]]``: 指定命令内容
-      * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-      * ``aliases: Optional[Set[Union[str, Tuple[str, ...]]]]``: 命令别名
-      * ``permission: Optional[Permission]``: 事件响应权限
-      * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-      * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-      * ``priority: int``: 事件响应器优先级
-      * ``block: bool``: 是否阻止事件向更低优先级传递
-      * ``state: Optional[T_State]``: 默认 state
-      * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-    :返回:
-
-      - ``Type[Matcher]``
-    """
-
-    async def _strip_cmd(bot: "Bot", event: "Event", state: T_State):
-        message = event.get_message()
-        if len(message) < 1:
-            return
-        segment = message.pop(0)
-        segment_text = str(segment).lstrip()
-        if not segment_text.startswith(state["_prefix"]["raw_command"]):
-            return
-        new_message = message.__class__(
-            segment_text[len(state["_prefix"]["raw_command"]):].lstrip())
-        for new_segment in reversed(new_message):
-            message.insert(0, new_segment)
-
-    handlers = kwargs.pop("handlers", [])
-    handlers.insert(0, _strip_cmd)
-
-    commands = set([cmd]) | (aliases or set())
-    return on_message(command(*commands) & rule, handlers=handlers, **kwargs)
-
-
-def on_shell_command(cmd: Union[str, Tuple[str, ...]],
-                     rule: Optional[Union[Rule, T_RuleChecker]] = None,
-                     aliases: Optional[Set[Union[str, Tuple[str, ...]]]] = None,
-                     parser: Optional[ArgumentParser] = None,
-                     **kwargs) -> Type[Matcher]:
-    """
-    :说明:
-
-      注册一个支持 ``shell_like`` 解析参数的命令消息事件响应器。
-
-      与普通的 ``on_command`` 不同的是，在添加 ``parser`` 参数时, 响应器会自动处理消息。
-
-      并将用户输入的原始参数列表保存在 ``state["argv"]``, ``parser`` 处理的参数保存在 ``state["args"]`` 中
-
-    :参数:
-
-      * ``cmd: Union[str, Tuple[str, ...]]``: 指定命令内容
-      * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-      * ``aliases: Optional[Set[Union[str, Tuple[str, ...]]]]``: 命令别名
-      * ``parser: Optional[ArgumentParser]``: ``nonebot.rule.ArgumentParser`` 对象
-      * ``permission: Optional[Permission]``: 事件响应权限
-      * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-      * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-      * ``priority: int``: 事件响应器优先级
-      * ``block: bool``: 是否阻止事件向更低优先级传递
-      * ``state: Optional[T_State]``: 默认 state
-      * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-    :返回:
-
-      - ``Type[Matcher]``
-    """
-
-    async def _strip_cmd(bot: "Bot", event: "Event", state: T_State):
-        message = event.get_message()
-        segment = message.pop(0)
-        new_message = message.__class__(
-            str(segment)
-            [len(state["_prefix"]["raw_command"]):].strip())  # type: ignore
-        for new_segment in reversed(new_message):
-            message.insert(0, new_segment)
-
-    handlers = kwargs.pop("handlers", [])
-    handlers.insert(0, _strip_cmd)
-
-    commands = set([cmd]) | (aliases or set())
-    return on_message(shell_command(*commands, parser=parser) & rule,
-                      handlers=handlers,
-                      **kwargs)
-
-
-def on_regex(pattern: str,
-             flags: Union[int, re.RegexFlag] = 0,
-             rule: Optional[Union[Rule, T_RuleChecker]] = None,
-             **kwargs) -> Type[Matcher]:
-    """
-    :说明:
-
-      注册一个消息事件响应器，并且当消息匹配正则表达式时响应。
-
-      命令匹配规则参考: `正则匹配 <rule.html#regex-regex-flags-0>`_
-
-    :参数:
-
-      * ``pattern: str``: 正则表达式
-      * ``flags: Union[int, re.RegexFlag]``: 正则匹配标志
-      * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-      * ``permission: Optional[Permission]``: 事件响应权限
-      * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-      * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-      * ``priority: int``: 事件响应器优先级
-      * ``block: bool``: 是否阻止事件向更低优先级传递
-      * ``state: Optional[T_State]``: 默认 state
-      * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-    :返回:
-
-      - ``Type[Matcher]``
-    """
-    return on_message(regex(pattern, flags) & rule, **kwargs)
-
-
-class CommandGroup:
-    """命令组，用于声明一组有相同名称前缀的命令。"""
-
-    def __init__(self, cmd: Union[str, Tuple[str, ...]], **kwargs):
-        """
-        :参数:
-
-          * ``cmd: Union[str, Tuple[str, ...]]``: 命令前缀
-          * ``**kwargs``: 其他传递给 ``on_command`` 的参数默认值，参考 `on_command <#on-command-cmd-rule-none-aliases-none-kwargs>`_
-        """
-        self.basecmd: Tuple[str, ...] = (cmd,) if isinstance(cmd, str) else cmd
-        """
-        - **类型**: ``Tuple[str, ...]``
-        - **说明**: 命令前缀
-        """
-        if "aliases" in kwargs:
-            del kwargs["aliases"]
-        self.base_kwargs: Dict[str, Any] = kwargs
-        """
-        - **类型**: ``Dict[str, Any]``
-        - **说明**: 其他传递给 ``on_command`` 的参数默认值
-        """
-
-    def command(self, cmd: Union[str, Tuple[str, ...]],
-                **kwargs) -> Type[Matcher]:
-        """
-        :说明:
-
-          注册一个新的命令。
-
-        :参数:
-
-          * ``cmd: Union[str, Tuple[str, ...]]``: 命令前缀
-          * ``**kwargs``: 其他传递给 ``on_command`` 的参数，将会覆盖命令组默认值
-
-        :返回:
-
-          - ``Type[Matcher]``
-        """
-        sub_cmd = (cmd,) if isinstance(cmd, str) else cmd
-        cmd = self.basecmd + sub_cmd
-
-        final_kwargs = self.base_kwargs.copy()
-        final_kwargs.update(kwargs)
-        return on_command(cmd, **final_kwargs)
-
-    def shell_command(self, cmd: Union[str, Tuple[str, ...]],
-                      **kwargs) -> Type[Matcher]:
-        """
-        :说明:
-
-          注册一个新的命令。
-
-        :参数:
-
-          * ``cmd: Union[str, Tuple[str, ...]]``: 命令前缀
-          * ``**kwargs``: 其他传递给 ``on_shell_command`` 的参数，将会覆盖命令组默认值
-
-        :返回:
-
-          - ``Type[Matcher]``
-        """
-        sub_cmd = (cmd,) if isinstance(cmd, str) else cmd
-        cmd = self.basecmd + sub_cmd
-
-        final_kwargs = self.base_kwargs.copy()
-        final_kwargs.update(kwargs)
-        return on_shell_command(cmd, **final_kwargs)
-
-
-class MatcherGroup:
-    """事件响应器组合，统一管理。为 ``Matcher`` 创建提供默认属性。"""
-
-    def __init__(self, **kwargs):
-        """
-        :说明:
-
-          创建一个事件响应器组合，参数为默认值，与 ``on`` 一致
-        """
-        self.matchers: List[Type[Matcher]] = []
-        """
-        :类型: ``List[Type[Matcher]]``
-        :说明: 组内事件响应器列表
-        """
-        self.base_kwargs: Dict[str, Any] = kwargs
-        """
-        - **类型**: ``Dict[str, Any]``
-        - **说明**: 其他传递给 ``on`` 的参数默认值
-        """
-
-    def on(self, **kwargs) -> Type[Matcher]:
-        """
-        :说明:
-
-          注册一个基础事件响应器，可自定义类型。
-
-        :参数:
-
-          * ``type: str``: 事件响应器类型
-          * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-          * ``permission: Optional[Permission]``: 事件响应权限
-          * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-          * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-          * ``priority: int``: 事件响应器优先级
-          * ``block: bool``: 是否阻止事件向更低优先级传递
-          * ``state: Optional[T_State]``: 默认 state
-          * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-        :返回:
-
-          - ``Type[Matcher]``
-        """
-        final_kwargs = self.base_kwargs.copy()
-        final_kwargs.update(kwargs)
-        matcher = on(**final_kwargs)
-        self.matchers.append(matcher)
-        return matcher
-
-    def on_metaevent(self, **kwargs) -> Type[Matcher]:
-        """
-        :说明:
-
-          注册一个元事件响应器。
-
-        :参数:
-
-          * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-          * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-          * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-          * ``priority: int``: 事件响应器优先级
-          * ``block: bool``: 是否阻止事件向更低优先级传递
-          * ``state: Optional[T_State]``: 默认 state
-          * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-        :返回:
-
-          - ``Type[Matcher]``
-        """
-        final_kwargs = self.base_kwargs.copy()
-        final_kwargs.update(kwargs)
-        final_kwargs.pop("type", None)
-        final_kwargs.pop("permission", None)
-        matcher = on_metaevent(**final_kwargs)
-        self.matchers.append(matcher)
-        return matcher
-
-    def on_message(self, **kwargs) -> Type[Matcher]:
-        """
-        :说明:
-
-          注册一个消息事件响应器。
-
-        :参数:
-
-          * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-          * ``permission: Optional[Permission]``: 事件响应权限
-          * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-          * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-          * ``priority: int``: 事件响应器优先级
-          * ``block: bool``: 是否阻止事件向更低优先级传递
-          * ``state: Optional[T_State]``: 默认 state
-          * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-        :返回:
-
-          - ``Type[Matcher]``
-        """
-        final_kwargs = self.base_kwargs.copy()
-        final_kwargs.update(kwargs)
-        final_kwargs.pop("type", None)
-        matcher = on_message(**final_kwargs)
-        self.matchers.append(matcher)
-        return matcher
-
-    def on_notice(self, **kwargs) -> Type[Matcher]:
-        """
-        :说明:
-
-          注册一个通知事件响应器。
-
-        :参数:
-
-          * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-          * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-          * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-          * ``priority: int``: 事件响应器优先级
-          * ``block: bool``: 是否阻止事件向更低优先级传递
-          * ``state: Optional[T_State]``: 默认 state
-          * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-        :返回:
-
-          - ``Type[Matcher]``
-        """
-        final_kwargs = self.base_kwargs.copy()
-        final_kwargs.update(kwargs)
-        final_kwargs.pop("type", None)
-        matcher = on_notice(**final_kwargs)
-        self.matchers.append(matcher)
-        return matcher
-
-    def on_request(self, **kwargs) -> Type[Matcher]:
-        """
-        :说明:
-
-          注册一个请求事件响应器。
-
-        :参数:
-
-          * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-          * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-          * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-          * ``priority: int``: 事件响应器优先级
-          * ``block: bool``: 是否阻止事件向更低优先级传递
-          * ``state: Optional[T_State]``: 默认 state
-          * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-        :返回:
-
-          - ``Type[Matcher]``
-        """
-        final_kwargs = self.base_kwargs.copy()
-        final_kwargs.update(kwargs)
-        final_kwargs.pop("type", None)
-        matcher = on_request(**final_kwargs)
-        self.matchers.append(matcher)
-        return matcher
-
-    def on_startswith(self, msg: Union[str, Tuple[str, ...]],
-                      **kwargs) -> Type[Matcher]:
-        """
-        :说明:
-
-          注册一个消息事件响应器，并且当消息的**文本部分**以指定内容开头时响应。
-
-        :参数:
-
-          * ``msg: Union[str, Tuple[str, ...]]``: 指定消息开头内容
-          * ``ignorecase: bool``: 是否忽略大小写
-          * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-          * ``permission: Optional[Permission]``: 事件响应权限
-          * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-          * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-          * ``priority: int``: 事件响应器优先级
-          * ``block: bool``: 是否阻止事件向更低优先级传递
-          * ``state: Optional[T_State]``: 默认 state
-          * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-        :返回:
-
-          - ``Type[Matcher]``
-        """
-        final_kwargs = self.base_kwargs.copy()
-        final_kwargs.update(kwargs)
-        final_kwargs.pop("type", None)
-        matcher = on_startswith(msg, **final_kwargs)
-        self.matchers.append(matcher)
-        return matcher
-
-    def on_endswith(self, msg: Union[str, Tuple[str, ...]],
-                    **kwargs) -> Type[Matcher]:
-        """
-        :说明:
-
-          注册一个消息事件响应器，并且当消息的**文本部分**以指定内容结尾时响应。
-
-        :参数:
-
-          * ``msg: Union[str, Tuple[str, ...]]``: 指定消息结尾内容
-          * ``ignorecase: bool``: 是否忽略大小写
-          * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-          * ``permission: Optional[Permission]``: 事件响应权限
-          * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-          * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-          * ``priority: int``: 事件响应器优先级
-          * ``block: bool``: 是否阻止事件向更低优先级传递
-          * ``state: Optional[T_State]``: 默认 state
-          * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-        :返回:
-
-          - ``Type[Matcher]``
-        """
-        final_kwargs = self.base_kwargs.copy()
-        final_kwargs.update(kwargs)
-        final_kwargs.pop("type", None)
-        matcher = on_endswith(msg, **final_kwargs)
-        self.matchers.append(matcher)
-        return matcher
-
-    def on_keyword(self, keywords: Set[str], **kwargs) -> Type[Matcher]:
-        """
-        :说明:
-
-          注册一个消息事件响应器，并且当消息纯文本部分包含关键词时响应。
-
-        :参数:
-
-          * ``keywords: Set[str]``: 关键词列表
-          * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-          * ``permission: Optional[Permission]``: 事件响应权限
-          * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-          * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-          * ``priority: int``: 事件响应器优先级
-          * ``block: bool``: 是否阻止事件向更低优先级传递
-          * ``state: Optional[T_State]``: 默认 state
-          * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-        :返回:
-
-          - ``Type[Matcher]``
-        """
-        final_kwargs = self.base_kwargs.copy()
-        final_kwargs.update(kwargs)
-        final_kwargs.pop("type", None)
-        matcher = on_keyword(keywords, **final_kwargs)
-        self.matchers.append(matcher)
-        return matcher
-
-    def on_command(self,
-                   cmd: Union[str, Tuple[str, ...]],
-                   aliases: Optional[Set[Union[str, Tuple[str, ...]]]] = None,
-                   **kwargs) -> Type[Matcher]:
-        """
-        :说明:
-
-          注册一个消息事件响应器，并且当消息以指定命令开头时响应。
-
-          命令匹配规则参考: `命令形式匹配 <rule.html#command-command>`_
-
-        :参数:
-
-          * ``cmd: Union[str, Tuple[str, ...]]``: 指定命令内容
-          * ``aliases: Optional[Set[Union[str, Tuple[str, ...]]]]``: 命令别名
-          * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-          * ``permission: Optional[Permission]``: 事件响应权限
-          * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-          * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-          * ``priority: int``: 事件响应器优先级
-          * ``block: bool``: 是否阻止事件向更低优先级传递
-          * ``state: Optional[T_State]``: 默认 state
-          * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-        :返回:
-
-          - ``Type[Matcher]``
-        """
-        final_kwargs = self.base_kwargs.copy()
-        final_kwargs.update(kwargs)
-        final_kwargs.pop("type", None)
-        matcher = on_command(cmd, aliases=aliases, **final_kwargs)
-        self.matchers.append(matcher)
-        return matcher
-
-    def on_shell_command(self,
-                         cmd: Union[str, Tuple[str, ...]],
-                         aliases: Optional[Set[Union[str, Tuple[str,
-                                                                ...]]]] = None,
-                         parser: Optional[ArgumentParser] = None,
-                         **kwargs) -> Type[Matcher]:
-        """
-        :说明:
-
-          注册一个支持 ``shell_like`` 解析参数的命令消息事件响应器。
-
-          与普通的 ``on_command`` 不同的是，在添加 ``parser`` 参数时, 响应器会自动处理消息。
-
-          并将用户输入的原始参数列表保存在 ``state["argv"]``, ``parser`` 处理的参数保存在 ``state["args"]`` 中
-
-        :参数:
-
-          * ``cmd: Union[str, Tuple[str, ...]]``: 指定命令内容
-          * ``aliases: Optional[Set[Union[str, Tuple[str, ...]]]]``: 命令别名
-          * ``parser: Optional[ArgumentParser]``: ``nonebot.rule.ArgumentParser`` 对象
-          * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-          * ``permission: Optional[Permission]``: 事件响应权限
-          * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-          * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-          * ``priority: int``: 事件响应器优先级
-          * ``block: bool``: 是否阻止事件向更低优先级传递
-          * ``state: Optional[T_State]``: 默认 state
-          * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-        :返回:
-
-          - ``Type[Matcher]``
-        """
-        final_kwargs = self.base_kwargs.copy()
-        final_kwargs.update(kwargs)
-        final_kwargs.pop("type", None)
-        matcher = on_shell_command(cmd,
-                                   aliases=aliases,
-                                   parser=parser,
-                                   **final_kwargs)
-        self.matchers.append(matcher)
-        return matcher
-
-    def on_regex(self,
-                 pattern: str,
-                 flags: Union[int, re.RegexFlag] = 0,
-                 **kwargs) -> Type[Matcher]:
-        """
-        :说明:
-
-          注册一个消息事件响应器，并且当消息匹配正则表达式时响应。
-
-          命令匹配规则参考: `正则匹配 <rule.html#regex-regex-flags-0>`_
-
-        :参数:
-
-          * ``pattern: str``: 正则表达式
-          * ``flags: Union[int, re.RegexFlag]``: 正则匹配标志
-          * ``rule: Optional[Union[Rule, T_RuleChecker]]``: 事件响应规则
-          * ``permission: Optional[Permission]``: 事件响应权限
-          * ``handlers: Optional[List[Union[T_Handler, Handler]]]``: 事件处理函数列表
-          * ``temp: bool``: 是否为临时事件响应器（仅执行一次）
-          * ``priority: int``: 事件响应器优先级
-          * ``block: bool``: 是否阻止事件向更低优先级传递
-          * ``state: Optional[T_State]``: 默认 state
-          * ``state_factory: Optional[T_StateFactory]``: 默认 state 的工厂函数
-
-        :返回:
-
-          - ``Type[Matcher]``
-        """
-        final_kwargs = self.base_kwargs.copy()
-        final_kwargs.update(kwargs)
-        final_kwargs.pop("type", None)
-        matcher = on_regex(pattern, flags=flags, **final_kwargs)
-        self.matchers.append(matcher)
-        return matcher
-
-
-def _load_plugin(manager: PluginManager, plugin_name: str) -> Optional[Plugin]:
-    if plugin_name.startswith("_"):
-        return None
-
-    if plugin_name in plugins:
-        return None
-
-    try:
-        module = manager.load_plugin(plugin_name)
-
-        plugin = Plugin(plugin_name, module)
-        plugins[plugin_name] = plugin
-        logger.opt(colors=True).success(
-            f'Succeeded to import "<y>{escape_tag(plugin_name)}</y>"')
-        return plugin
-    except Exception as e:
-        logger.opt(colors=True, exception=e).error(
-            f'<r><bg #f8bbd0>Failed to import "{escape_tag(plugin_name)}"</bg #f8bbd0></r>'
+from typing import Optional, TypeVar
+
+from pydantic import BaseModel
+
+from nonebot import get_driver
+from nonebot.compat import model_dump, type_validate_python
+
+C = TypeVar("C", bound=BaseModel)
+
+_plugins: dict[str, "Plugin"] = {}
+_managers: list["PluginManager"] = []
+_current_plugin: ContextVar[Optional["Plugin"]] = ContextVar(
+    "_current_plugin", default=None
+)
+
+
+def _module_name_to_plugin_name(module_name: str) -> str:
+    return module_name.rsplit(".", 1)[-1]
+
+
+def _controlled_modules() -> dict[str, str]:
+    return {
+        plugin_id: module_name
+        for manager in _managers
+        for plugin_id, module_name in manager.controlled_modules.items()
+    }
+
+
+def _find_parent_plugin_id(
+    module_name: str, controlled_modules: Optional[dict[str, str]] = None
+) -> Optional[str]:
+    if controlled_modules is None:
+        controlled_modules = _controlled_modules()
+    available = {
+        module_name: plugin_id for plugin_id, module_name in controlled_modules.items()
+    }
+    while "." in module_name:
+        module_name, _ = module_name.rsplit(".", 1)
+        if module_name in available:
+            return available[module_name]
+
+
+def _module_name_to_plugin_id(
+    module_name: str, controlled_modules: Optional[dict[str, str]] = None
+) -> str:
+    plugin_name = _module_name_to_plugin_name(module_name)
+    if parent_plugin_id := _find_parent_plugin_id(module_name, controlled_modules):
+        return f"{parent_plugin_id}:{plugin_name}"
+    return plugin_name
+
+
+def _new_plugin(
+    module_name: str, module: ModuleType, manager: "PluginManager"
+) -> "Plugin":
+    plugin_id = _module_name_to_plugin_id(module_name)
+    if plugin_id in _plugins:
+        raise RuntimeError(
+            f"Plugin {plugin_id} already exists! Check your plugin name."
         )
-        return None
+
+    parent_plugin_id = _find_parent_plugin_id(module_name)
+    if parent_plugin_id is not None and parent_plugin_id not in _plugins:
+        raise RuntimeError(
+            f"Parent plugin {parent_plugin_id} must "
+            f"be loaded before loading {plugin_id}."
+        )
+    parent_plugin = _plugins[parent_plugin_id] if parent_plugin_id is not None else None
+
+    plugin = Plugin(
+        name=_module_name_to_plugin_name(module_name),
+        module=module,
+        module_name=module_name,
+        manager=manager,
+        parent_plugin=parent_plugin,
+    )
+    if parent_plugin:
+        parent_plugin.sub_plugins.add(plugin)
+
+    _plugins[plugin_id] = plugin
+    return plugin
 
 
-def load_plugin(module_path: str) -> Optional[Plugin]:
+def _revert_plugin(plugin: "Plugin") -> None:
+    if plugin.id_ not in _plugins:
+        raise RuntimeError("Plugin not found!")
+    del _plugins[plugin.id_]
+    if parent_plugin := plugin.parent_plugin:
+        parent_plugin.sub_plugins.discard(plugin)
+
+
+def get_plugin(plugin_id: str) -> Optional["Plugin"]:
+    """获取已经导入的某个插件。
+
+    如果为 `load_plugins` 文件夹导入的插件，则为文件(夹)名。
+
+    如果为嵌套的子插件，标识符为 `父插件标识符:子插件文件(夹)名`。
+
+    参数:
+        plugin_id: 插件标识符，即 {ref}`nonebot.plugin.model.Plugin.id_`。
     """
-    :说明:
+    return _plugins.get(plugin_id)
 
-      使用 ``PluginManager`` 加载单个插件，可以是本地插件或是通过 ``pip`` 安装的插件。
 
-    :参数:
+def get_plugin_by_module_name(module_name: str) -> Optional["Plugin"]:
+    """通过模块名获取已经导入的某个插件。
 
-      * ``module_path: str``: 插件名称 ``path.to.your.plugin``
+    如果提供的模块名为某个插件的子模块，同样会返回该插件。
 
-    :返回:
-
-      - ``Optional[Plugin]``
+    参数:
+        module_name: 模块名，即 {ref}`nonebot.plugin.model.Plugin.module_name`。
     """
-
-    context: Context = copy_context()
-    manager = PluginManager(PLUGIN_NAMESPACE, plugins=[module_path])
-    return context.run(_load_plugin, manager, module_path)
-
-
-def load_plugins(*plugin_dir: str) -> Set[Plugin]:
-    """
-    :说明:
-
-      导入目录下多个插件，以 ``_`` 开头的插件不会被导入！
-
-    :参数:
-
-      - ``*plugin_dir: str``: 插件路径
-
-    :返回:
-
-      - ``Set[Plugin]``
-    """
-    loaded_plugins = set()
-    manager = PluginManager(PLUGIN_NAMESPACE, search_path=plugin_dir)
-    for plugin_name in manager.list_plugins():
-        context: Context = copy_context()
-        result = context.run(_load_plugin, manager, plugin_name)
-        if result:
-            loaded_plugins.add(result)
-    return loaded_plugins
+    loaded = {plugin.module_name: plugin for plugin in _plugins.values()}
+    has_parent = True
+    while has_parent:
+        if module_name in loaded:
+            return loaded[module_name]
+        module_name, *has_parent = module_name.rsplit(".", 1)
 
 
-def load_all_plugins(module_path: Set[str],
-                     plugin_dir: Set[str]) -> Set[Plugin]:
-    """
-    :说明:
-
-      导入指定列表中的插件以及指定目录下多个插件，以 ``_`` 开头的插件不会被导入！
-
-    :参数:
-
-      - ``module_path: Set[str]``: 指定插件集合
-      - ``plugin_dir: Set[str]``: 指定插件路径集合
-
-    :返回:
-
-      - ``Set[Plugin]``
-    """
-    loaded_plugins = set()
-    manager = PluginManager(PLUGIN_NAMESPACE, module_path, plugin_dir)
-    for plugin_name in manager.list_plugins():
-        context: Context = copy_context()
-        result = context.run(_load_plugin, manager, plugin_name)
-        if result:
-            loaded_plugins.add(result)
-    return loaded_plugins
+def get_loaded_plugins() -> set["Plugin"]:
+    """获取当前已导入的所有插件。"""
+    return set(_plugins.values())
 
 
-def load_from_json(file_path: str, encoding: str = "utf-8") -> Set[Plugin]:
-    """
-    :说明:
-
-      导入指定 json 文件中的 ``plugins`` 以及 ``plugin_dirs`` 下多个插件，以 ``_`` 开头的插件不会被导入！
-
-    :参数:
-
-      - ``file_path: str``: 指定 json 文件路径
-      - ``encoding: str``: 指定 json 文件编码
-
-    :返回:
-
-      - ``Set[Plugin]``
-    """
-    with open(file_path, "r", encoding=encoding) as f:
-        data = json.load(f)
-    plugins = data.get("plugins")
-    plugin_dirs = data.get("plugin_dirs")
-    assert isinstance(plugins, list), "plugins must be a list of plugin name"
-    assert isinstance(plugin_dirs,
-                      list), "plugin_dirs must be a list of directories"
-    return load_all_plugins(set(plugins), set(plugin_dirs))
+def get_available_plugin_names() -> set[str]:
+    """获取当前所有可用的插件标识符（包含尚未加载的插件）。"""
+    return {*chain.from_iterable(manager.available_plugins for manager in _managers)}
 
 
-def load_from_toml(file_path: str, encoding: str = "utf-8") -> Set[Plugin]:
-    """
-    :说明:
-
-      导入指定 toml 文件 ``[nonebot.plugins]`` 中的 ``plugins`` 以及 ``plugin_dirs`` 下多个插件，
-      以 ``_`` 开头的插件不会被导入！
-
-    :参数:
-
-      - ``file_path: str``: 指定 toml 文件路径
-      - ``encoding: str``: 指定 toml 文件编码
-
-    :返回:
-
-      - ``Set[Plugin]``
-    """
-    with open(file_path, "r", encoding=encoding) as f:
-        data = tomlkit.parse(f.read())  # type: ignore
-
-    nonebot_data = data.get("nonebot", {}).get("plugins")
-    if not nonebot_data:
-        raise ValueError("Cannot find '[nonebot.plugins]' in given toml file!")
-    plugins = nonebot_data.get("plugins", [])
-    plugin_dirs = nonebot_data.get("plugin_dirs", [])
-    assert isinstance(plugins, list), "plugins must be a list of plugin name"
-    assert isinstance(plugin_dirs,
-                      list), "plugin_dirs must be a list of directories"
-    return load_all_plugins(set(plugins), set(plugin_dirs))
+def get_plugin_config(config: type[C]) -> C:
+    """从全局配置获取当前插件需要的配置项。"""
+    return type_validate_python(config, model_dump(get_driver().config))
 
 
-def load_builtin_plugins(name: str = "echo") -> Optional[Plugin]:
-    """
-    :说明:
-
-      导入 NoneBot 内置插件
-
-    :返回:
-
-      - ``Plugin``
-    """
-    return load_plugin(f"nonebot.plugins.{name}")
-
-
-def get_plugin(name: str) -> Optional[Plugin]:
-    """
-    :说明:
-
-      获取当前导入的某个插件。
-
-    :参数:
-
-      * ``name: str``: 插件名，与 ``load_plugin`` 参数一致。如果为 ``load_plugins`` 导入的插件，则为文件(夹)名。
-
-    :返回:
-
-      - ``Optional[Plugin]``
-    """
-    return plugins.get(name)
-
-
-def get_loaded_plugins() -> Set[Plugin]:
-    """
-    :说明:
-
-      获取当前已导入的所有插件。
-
-    :返回:
-
-      - ``Set[Plugin]``
-    """
-    return set(plugins.values())
-
-
-def require(name: str) -> Optional[Export]:
-    """
-    :说明:
-
-      获取一个插件的导出内容
-
-    :参数:
-
-      * ``name: str``: 插件名，与 ``load_plugin`` 参数一致。如果为 ``load_plugins`` 导入的插件，则为文件(夹)名。
-
-    :返回:
-
-      - ``Optional[Export]``
-    """
-    plugin = get_plugin(name) or load_plugin(name)
-    return plugin.export if plugin else None
+from .load import inherit_supported_adapters as inherit_supported_adapters
+from .load import load_all_plugins as load_all_plugins
+from .load import load_builtin_plugin as load_builtin_plugin
+from .load import load_builtin_plugins as load_builtin_plugins
+from .load import load_from_json as load_from_json
+from .load import load_from_toml as load_from_toml
+from .load import load_plugin as load_plugin
+from .load import load_plugins as load_plugins
+from .load import require as require
+from .manager import PluginManager
+from .model import Plugin as Plugin
+from .model import PluginMetadata as PluginMetadata
+from .on import CommandGroup as CommandGroup
+from .on import MatcherGroup as MatcherGroup
+from .on import on as on
+from .on import on_command as on_command
+from .on import on_endswith as on_endswith
+from .on import on_fullmatch as on_fullmatch
+from .on import on_keyword as on_keyword
+from .on import on_message as on_message
+from .on import on_metaevent as on_metaevent
+from .on import on_notice as on_notice
+from .on import on_regex as on_regex
+from .on import on_request as on_request
+from .on import on_shell_command as on_shell_command
+from .on import on_startswith as on_startswith
+from .on import on_type as on_type

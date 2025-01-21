@@ -1,233 +1,236 @@
-import sys
-import uuid
-import pkgutil
+"""本模块实现插件加载流程。
+
+参考: [import hooks](https://docs.python.org/3/reference/import.html#import-hooks), [PEP302](https://www.python.org/dev/peps/pep-0302/)
+
+FrontMatter:
+    mdx:
+        format: md
+    sidebar_position: 5
+    description: nonebot.plugin.manager 模块
+"""
+
+from collections.abc import Iterable, Sequence
 import importlib
-from hashlib import md5
-from pathlib import Path
-from types import ModuleType
-from collections import Counter
-from contextvars import ContextVar
 from importlib.abc import MetaPathFinder
-from typing import Set, List, Iterable, Optional
 from importlib.machinery import PathFinder, SourceFileLoader
+from itertools import chain
+from pathlib import Path
+import pkgutil
+import sys
+from types import ModuleType
+from typing import Optional
 
-from .export import Export, _export
+from nonebot.log import logger
+from nonebot.utils import escape_tag, path_to_module_name
 
-_current_plugin: ContextVar[Optional[ModuleType]] = ContextVar(
-    "_current_plugin", default=None)
-
-_internal_space = ModuleType(__name__ + "._internal")
-_internal_space.__path__ = []  # type: ignore
-sys.modules[_internal_space.__name__] = _internal_space
-
-_manager_stack: List["PluginManager"] = []
-
-
-class _NamespaceModule(ModuleType):
-    """Simple namespace module to store plugins."""
-
-    @property
-    def __path__(self):
-        return []
-
-    def __getattr__(self, name: str):
-        try:
-            return super().__getattr__(name)  # type: ignore
-        except AttributeError:
-            if name.startswith("__"):
-                raise
-            raise RuntimeError("Plugin manager not activated!")
-
-
-class _InternalModule(ModuleType):
-    """Internal module for each plugin manager."""
-
-    def __init__(self, prefix: str, plugin_manager: "PluginManager"):
-        super().__init__(f"{prefix}.{plugin_manager.internal_id}")
-        self.__plugin_manager__ = plugin_manager
-
-    @property
-    def __path__(self) -> List[str]:
-        return list(self.__plugin_manager__.search_path)
+from . import (
+    _current_plugin,
+    _managers,
+    _module_name_to_plugin_id,
+    _new_plugin,
+    _revert_plugin,
+)
+from .model import Plugin, PluginMetadata
 
 
 class PluginManager:
+    """插件管理器。
 
-    def __init__(self,
-                 namespace: str,
-                 plugins: Optional[Iterable[str]] = None,
-                 search_path: Optional[Iterable[str]] = None,
-                 *,
-                 id: Optional[str] = None):
-        self.namespace: str = namespace
-        self.namespace_module: ModuleType = self._setup_namespace(namespace)
+    参数:
+        plugins: 独立插件模块名集合。
+        search_path: 插件搜索路径（文件夹），相对于当前工作目录。
+    """
 
-        self.id: str = id or str(uuid.uuid4())
-        self.internal_id: str = md5(
-            ((self.namespace or "") + self.id).encode()).hexdigest()
-        self.internal_module = self._setup_internal_module(self.internal_id)
-
+    def __init__(
+        self,
+        plugins: Optional[Iterable[str]] = None,
+        search_path: Optional[Iterable[str]] = None,
+    ):
         # simple plugin not in search path
-        self.plugins: Set[str] = set(plugins or [])
-        self.search_path: Set[str] = set(search_path or [])
-        # ensure can be loaded
-        self.list_plugins()
+        self.plugins: set[str] = set(plugins or [])
+        self.search_path: set[str] = set(search_path or [])
 
-    def _setup_namespace(self, namespace: str) -> ModuleType:
-        try:
-            module = importlib.import_module(namespace)
-        except ImportError:
-            module = _NamespaceModule(namespace)
-            if "." in namespace:
-                parent = importlib.import_module(namespace.rsplit(".", 1)[0])
-                setattr(parent, namespace.rsplit(".", 1)[1], module)
+        # cache plugins
+        self._third_party_plugin_ids: dict[str, str] = {}
+        self._searched_plugin_ids: dict[str, str] = {}
+        self._prepare_plugins()
 
-        sys.modules[namespace] = module
-        return module
+    def __repr__(self) -> str:
+        return f"PluginManager(available_plugins={self.controlled_modules})"
 
-    def _setup_internal_module(self, internal_id: str) -> ModuleType:
-        if hasattr(_internal_space, internal_id):
-            raise RuntimeError("Plugin manager already exists!")
+    @property
+    def third_party_plugins(self) -> set[str]:
+        """返回所有独立插件标识符。"""
+        return set(self._third_party_plugin_ids.keys())
 
-        index = 2
-        prefix: str = _internal_space.__name__
-        while True:
-            try:
-                frame = sys._getframe(index)
-            except ValueError:
-                break
-            # check if is called in plugin
-            if "__plugin_name__" not in frame.f_globals:
-                index += 1
-                continue
-            prefix = frame.f_globals.get("__name__", _internal_space.__name__)
-            break
+    @property
+    def searched_plugins(self) -> set[str]:
+        """返回已搜索到的插件标识符。"""
+        return set(self._searched_plugin_ids.keys())
 
-        if not prefix.startswith(_internal_space.__name__):
-            prefix = _internal_space.__name__
-        module = _InternalModule(prefix, self)
-        sys.modules[module.__name__] = module  # type: ignore
-        setattr(_internal_space, internal_id, module)
-        return module
+    @property
+    def available_plugins(self) -> set[str]:
+        """返回当前插件管理器中可用的插件标识符。"""
+        return self.third_party_plugins | self.searched_plugins
 
-    def __enter__(self):
-        if self in _manager_stack:
-            raise RuntimeError("Plugin manager already activated!")
-        _manager_stack.append(self)
-        return self
+    @property
+    def controlled_modules(self) -> dict[str, str]:
+        """返回当前插件管理器中控制的插件标识符与模块路径映射字典。"""
+        return dict(
+            chain(
+                self._third_party_plugin_ids.items(), self._searched_plugin_ids.items()
+            )
+        )
 
-    def __exit__(self, exc_type, exc_value, traceback):
-        try:
-            _manager_stack.pop()
-        except IndexError:
-            pass
-
-    def search_plugins(self) -> List[str]:
-        return [
-            module_info.name
-            for module_info in pkgutil.iter_modules(self.search_path)
-        ]
-
-    def list_plugins(self) -> Set[str]:
-        _pre_managers: List[PluginManager]
-        if self in _manager_stack:
-            _pre_managers = _manager_stack[:_manager_stack.index(self)]
+    def _previous_controlled_modules(self) -> dict[str, str]:
+        _pre_managers: list[PluginManager]
+        if self in _managers:
+            _pre_managers = _managers[: _managers.index(self)]
         else:
-            _pre_managers = _manager_stack[:]
+            _pre_managers = _managers[:]
 
-        _search_path: Set[str] = set()
-        for manager in _pre_managers:
-            _search_path |= manager.search_path
-        if _search_path & self.search_path:
-            raise RuntimeError("Duplicate plugin search path!")
+        return {
+            plugin_id: module_name
+            for manager in _pre_managers
+            for plugin_id, module_name in manager.controlled_modules.items()
+        }
 
-        _search_plugins = self.search_plugins()
-        c = Counter([*_search_plugins, *self.plugins])
-        conflict = [name for name, num in c.items() if num > 1]
-        if conflict:
-            raise RuntimeError(
-                f"More than one plugin named {' / '.join(conflict)}!")
-        return set(_search_plugins) | self.plugins
+    def _prepare_plugins(self) -> set[str]:
+        """搜索插件并缓存插件名称。"""
+        # get all previous ready to load plugins
+        previous_plugin_ids = self._previous_controlled_modules()
 
-    def load_plugin(self, name) -> ModuleType:
-        if name in self.plugins:
-            with self:
-                return importlib.import_module(name)
+        # if self not in global managers, merge self's controlled modules
+        def get_controlled_modules():
+            return (
+                previous_plugin_ids
+                if self in _managers
+                else {**previous_plugin_ids, **self.controlled_modules}
+            )
 
-        if "." in name:
-            raise ValueError("Plugin name cannot contain '.'")
+        # check third party plugins
+        for plugin in self.plugins:
+            plugin_id = _module_name_to_plugin_id(plugin, get_controlled_modules())
+            if (
+                plugin_id in self._third_party_plugin_ids
+                or plugin_id in previous_plugin_ids
+            ):
+                raise RuntimeError(
+                    f"Plugin already exists: {plugin_id}! Check your plugin name"
+                )
+            self._third_party_plugin_ids[plugin_id] = plugin
 
-        with self:
-            return importlib.import_module(f"{self.namespace}.{name}")
-
-    def load_all_plugins(self) -> List[ModuleType]:
-        return [self.load_plugin(name) for name in self.list_plugins()]
-
-    def _rewrite_module_name(self, module_name: str) -> Optional[str]:
-        prefix = f"{self.internal_module.__name__}."
-        raw_name = module_name[len(self.namespace) +
-                               1:] if module_name.startswith(self.namespace +
-                                                             ".") else None
-        # dir plugins
-        if raw_name and raw_name.split(".")[0] in self.search_plugins():
-            return f"{prefix}{raw_name}"
-        # third party plugin or renamed dir plugins
-        elif module_name in self.plugins or module_name.startswith(prefix):
-            return module_name
-        # dir plugins
-        elif module_name in self.search_plugins():
-            return f"{prefix}{module_name}"
-        return None
-
-    def _check_absolute_import(self, origin_path: str) -> Optional[str]:
-        if not self.search_path:
-            return
-        paths = set([
-            *self.search_path,
-            *(str(Path(path).resolve()) for path in self.search_path)
-        ])
-        for path in paths:
-            try:
-                rel_path = Path(origin_path).relative_to(path)
-                if rel_path.stem == "__init__":
-                    return f"{self.internal_module.__name__}." + ".".join(
-                        rel_path.parts[:-1])
-                return f"{self.internal_module.__name__}." + ".".join(
-                    rel_path.parts[:-1] + (rel_path.stem,))
-            except ValueError:
+        # check plugins in search path
+        for module_info in pkgutil.iter_modules(self.search_path):
+            # ignore if startswith "_"
+            if module_info.name.startswith("_"):
                 continue
+
+            if not (
+                module_spec := module_info.module_finder.find_spec(
+                    module_info.name, None
+                )
+            ):
+                continue
+
+            if not module_spec.origin:
+                continue
+
+            # get module name from path, pkgutil does not return the actual module name
+            module_path = Path(module_spec.origin).resolve()
+            module_name = path_to_module_name(module_path)
+            plugin_id = _module_name_to_plugin_id(module_name, get_controlled_modules())
+
+            if (
+                plugin_id in previous_plugin_ids
+                or plugin_id in self._third_party_plugin_ids
+                or plugin_id in self._searched_plugin_ids
+            ):
+                raise RuntimeError(
+                    f"Plugin already exists: {plugin_id}! Check your plugin name"
+                )
+
+            self._searched_plugin_ids[plugin_id] = module_name
+
+        return self.available_plugins
+
+    def load_plugin(self, name: str) -> Optional[Plugin]:
+        """加载指定插件。
+
+        可以使用完整插件模块名或者插件标识符加载。
+
+        参数:
+            name: 插件名称或插件标识符。
+        """
+
+        try:
+            # load using plugin id
+            if name in self._third_party_plugin_ids:
+                module = importlib.import_module(self._third_party_plugin_ids[name])
+            elif name in self._searched_plugin_ids:
+                module = importlib.import_module(self._searched_plugin_ids[name])
+            # load using module name
+            elif (
+                name in self._third_party_plugin_ids.values()
+                or name in self._searched_plugin_ids.values()
+            ):
+                module = importlib.import_module(name)
+            else:
+                raise RuntimeError(f"Plugin not found: {name}! Check your plugin name")
+
+            if (
+                plugin := getattr(module, "__plugin__", None)
+            ) is None or not isinstance(plugin, Plugin):
+                raise RuntimeError(
+                    f"Module {module.__name__} is not loaded as a plugin! "
+                    f"Make sure not to import it before loading."
+                )
+            logger.opt(colors=True).success(
+                f'Succeeded to load plugin "<y>{escape_tag(plugin.id_)}</y>"'
+                + (
+                    f' from "<m>{escape_tag(plugin.module_name)}</m>"'
+                    if plugin.module_name != plugin.id_
+                    else ""
+                )
+            )
+            return plugin
+        except Exception as e:
+            logger.opt(colors=True, exception=e).error(
+                f'<r><bg #f8bbd0>Failed to import "{escape_tag(name)}"</bg #f8bbd0></r>'
+            )
+
+    def load_all_plugins(self) -> set[Plugin]:
+        """加载所有可用插件。"""
+
+        return set(
+            filter(None, (self.load_plugin(name) for name in self.available_plugins))
+        )
 
 
 class PluginFinder(MetaPathFinder):
+    def find_spec(
+        self,
+        fullname: str,
+        path: Optional[Sequence[str]],
+        target: Optional[ModuleType] = None,
+    ):
+        if _managers:
+            module_spec = PathFinder.find_spec(fullname, path, target)
+            if not module_spec:
+                return
+            module_origin = module_spec.origin
+            if not module_origin:
+                return
 
-    def find_spec(self, fullname: str, path, target):
-        if _manager_stack:
-            index = -1
-            origin_spec = PathFinder.find_spec(fullname, path, target)
-            while -index <= len(_manager_stack):
-                manager = _manager_stack[index]
-
-                rel_name = None
-                if origin_spec and origin_spec.origin:
-                    rel_name = manager._check_absolute_import(
-                        origin_spec.origin)
-
-                newname = manager._rewrite_module_name(rel_name or fullname)
-                if newname:
-                    spec = PathFinder.find_spec(
-                        newname, path or [*manager.search_path, *sys.path],
-                        target)
-                    if spec:
-                        spec.loader = PluginLoader(  # type: ignore
-                            manager, newname, spec.origin)
-                        return spec
-                index -= 1
-        return None
+            for manager in reversed(_managers):
+                if fullname in manager.controlled_modules.values():
+                    module_spec.loader = PluginLoader(manager, fullname, module_origin)
+                    return module_spec
+        return
 
 
 class PluginLoader(SourceFileLoader):
-
-    def __init__(self, manager: PluginManager, fullname: str, path) -> None:
+    def __init__(self, manager: PluginManager, fullname: str, path: str) -> None:
         self.manager = manager
         self.loaded = False
         super().__init__(fullname, path)
@@ -243,31 +246,26 @@ class PluginLoader(SourceFileLoader):
         if self.loaded:
             return
 
-        export = Export()
-        _export_token = _export.set(export)
+        # create plugin before executing
+        plugin = _new_plugin(self.name, module, self.manager)
+        setattr(module, "__plugin__", plugin)
 
-        prefix = self.manager.internal_module.__name__
-        is_dir_plugin = self.name.startswith(prefix + ".")
-        module_name = self.name[len(prefix) +
-                                1:] if is_dir_plugin else self.name
-        _plugin_token = _current_plugin.set(module)
+        # enter plugin context
+        _plugin_token = _current_plugin.set(plugin)
 
-        setattr(module, "__export__", export)
-        setattr(module, "__plugin_name__",
-                module_name.split(".")[0] if is_dir_plugin else module_name)
-        setattr(module, "__module_name__", module_name)
-        setattr(module, "__module_prefix__", prefix if is_dir_plugin else "")
+        try:
+            super().exec_module(module)
+        except Exception:
+            _revert_plugin(plugin)
+            raise
+        finally:
+            # leave plugin context
+            _current_plugin.reset(_plugin_token)
 
-        # try:
-        #     super().exec_module(module)
-        # except Exception as e:
-        #     raise ImportError(
-        #         f"Error when executing module {module_name} from {module.__file__}."
-        #     ) from e
-        super().exec_module(module)
+        # get plugin metadata
+        metadata: Optional[PluginMetadata] = getattr(module, "__plugin_meta__", None)
+        plugin.metadata = metadata
 
-        _current_plugin.reset(_plugin_token)
-        _export.reset(_export_token)
         return
 
 
