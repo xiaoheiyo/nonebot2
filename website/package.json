@@ -1,0 +1,63 @@
+{
+  "name": "nonebot",
+  "version": "2.0.0",
+  "description": "跨平台 Python 异步机器人框架",
+  "private": true,
+  "homepage": "https://nonebot.dev/",
+  "repository": "https://github.com/nonebot/nonebot2/",
+  "bugs": {
+    "url": "https://github.com/nonebot/nonebot2/issues"
+  },
+  "license": "MIT",
+  "scripts": {
+    "docusaurus": "docusaurus",
+    "start": "docusaurus start --host 0.0.0.0 --port 3000",
+    "build": "docusaurus build",
+    "swizzle": "docusaurus swizzle",
+    "deploy": "docusaurus deploy",
+    "clear": "docusaurus clear",
+    "serve": "docusaurus serve",
+    "write-translations": "docusaurus write-translations",
+    "write-heading-ids": "docusaurus write-heading-ids",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "@docusaurus/core": "^3.6.2",
+    "@mdx-js/react": "^3.0.0",
+    "@nullbot/docusaurus-plugin-changelog": "^3.0.0",
+    "@nullbot/docusaurus-preset-nonepress": "^3.0.0",
+    "@swc/core": "^1.7.26",
+    "clsx": "^2.0.0",
+    "copy-text-to-clipboard": "^3.2.0",
+    "prism-react-renderer": "^2.3.0",
+    "raw-loader": "^4.0.2",
+    "react": "^18.0.0",
+    "react-color": "^2.19.3",
+    "react-dom": "^18.0.0",
+    "react-use-pagination": "^2.0.1",
+    "swc-loader": "^0.2.6"
+  },
+  "devDependencies": {
+    "@docusaurus/faster": "^3.6.2",
+    "@docusaurus/module-type-aliases": "^3.6.2",
+    "@nullbot/docusaurus-tsconfig": "^3.0.0",
+    "@types/react-color": "^3.0.10",
+    "asciinema-player": "^3.5.0",
+    "typescript": "~5.5.2"
+  },
+  "browserslist": {
+    "production": [
+      ">0.5%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "engines": {
+    "node": ">=18.0"
+  }
+}

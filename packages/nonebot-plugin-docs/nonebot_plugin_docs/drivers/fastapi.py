@@ -1,7 +1,8 @@
 from pathlib import Path
 
-from nonebot.drivers.fastapi import Driver
 from fastapi.staticfiles import StaticFiles
+
+from nonebot.drivers.fastapi import Driver
 
 
 def register_route(driver: Driver):
@@ -9,6 +10,4 @@ def register_route(driver: Driver):
 
     static_path = str((Path(__file__).parent / ".." / "dist").resolve())
 
-    app.mount("/docs",
-              StaticFiles(directory=static_path, html=True),
-              name="docs")
+    app.mount("/website", StaticFiles(directory=static_path, html=True), name="docs")

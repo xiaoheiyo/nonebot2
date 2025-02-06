@@ -1,158 +1,119 @@
-r"""
-权限
-====
+"""本模块是 {ref}`nonebot.matcher.Matcher.permission` 的类型定义。
 
-每个 ``Matcher`` 拥有一个 ``Permission`` ，其中是 **异步** ``PermissionChecker`` 的集合，只要有一个 ``PermissionChecker`` 检查结果为 ``True`` 时就会继续运行。
+每个{ref}`事件响应器 <nonebot.matcher.Matcher>`
+拥有一个 {ref}`nonebot.permission.Permission`，其中是 `PermissionChecker` 的集合。
+只要有一个 `PermissionChecker` 检查结果为 `True` 时就会继续运行。
 
-\:\:\:tip 提示
-``PermissionChecker`` 既可以是 async function 也可以是 sync function
-\:\:\:
+FrontMatter:
+    mdx:
+        format: md
+    sidebar_position: 6
+    description: nonebot.permission 模块
 """
 
-import asyncio
-from typing import TYPE_CHECKING, Union, Callable, NoReturn, Optional, Awaitable
-
-from nonebot.utils import run_sync
-from nonebot.typing import T_PermissionChecker
-
-if TYPE_CHECKING:
-    from nonebot.adapters import Bot, Event
+from nonebot.adapters import Bot, Event
+from nonebot.internal.permission import USER as USER
+from nonebot.internal.permission import Permission as Permission
+from nonebot.internal.permission import User as User
+from nonebot.params import EventType
 
 
-class Permission:
-    """
-    :说明:
+class Message:
+    """检查是否为消息事件"""
 
-      ``Matcher`` 规则类，当事件传递时，在 ``Matcher`` 运行前进行检查。
+    __slots__ = ()
 
-    :示例:
+    def __repr__(self) -> str:
+        return "Message()"
 
-    .. code-block:: python
-
-        Permission(async_function) | sync_function
-        # 等价于
-        from nonebot.utils import run_sync
-        Permission(async_function, run_sync(sync_function))
-    """
-    __slots__ = ("checkers",)
-
-    def __init__(
-            self, *checkers: Callable[["Bot", "Event"],
-                                      Awaitable[bool]]) -> None:
-        """
-        :参数:
-
-          * ``*checkers: Callable[[Bot, Event], Awaitable[bool]]``: **异步** PermissionChecker
-        """
-        self.checkers = set(checkers)
-        """
-        :说明:
-
-          存储 ``PermissionChecker``
-
-        :类型:
-
-          * ``Set[Callable[[Bot, Event], Awaitable[bool]]]``
-        """
-
-    async def __call__(self, bot: "Bot", event: "Event") -> bool:
-        """
-        :说明:
-
-          检查是否满足某个权限
-
-        :参数:
-
-          * ``bot: Bot``: Bot 对象
-          * ``event: Event``: Event 对象
-
-        :返回:
-
-          - ``bool``
-        """
-        if not self.checkers:
-            return True
-        results = await asyncio.gather(
-            *map(lambda c: c(bot, event), self.checkers))
-        return any(results)
-
-    def __and__(self, other) -> NoReturn:
-        raise RuntimeError("And operation between Permissions is not allowed.")
-
-    def __or__(
-        self, other: Optional[Union["Permission",
-                                    T_PermissionChecker]]) -> "Permission":
-        checkers = self.checkers.copy()
-        if other is None:
-            return self
-        elif isinstance(other, Permission):
-            checkers |= other.checkers
-        elif asyncio.iscoroutinefunction(other):
-            checkers.add(other)  # type: ignore
-        else:
-            checkers.add(run_sync(other))
-        return Permission(*checkers)
+    async def __call__(self, type: str = EventType()) -> bool:
+        return type == "message"
 
 
-async def _message(bot: "Bot", event: "Event") -> bool:
-    return event.get_type() == "message"
+class Notice:
+    """检查是否为通知事件"""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "Notice()"
+
+    async def __call__(self, type: str = EventType()) -> bool:
+        return type == "notice"
 
 
-async def _notice(bot: "Bot", event: "Event") -> bool:
-    return event.get_type() == "notice"
+class Request:
+    """检查是否为请求事件"""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "Request()"
+
+    async def __call__(self, type: str = EventType()) -> bool:
+        return type == "request"
 
 
-async def _request(bot: "Bot", event: "Event") -> bool:
-    return event.get_type() == "request"
+class MetaEvent:
+    """检查是否为元事件"""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "MetaEvent()"
+
+    async def __call__(self, type: str = EventType()) -> bool:
+        return type == "meta_event"
 
 
-async def _metaevent(bot: "Bot", event: "Event") -> bool:
-    return event.get_type() == "meta_event"
+MESSAGE: Permission = Permission(Message())
+"""匹配任意 `message` 类型事件
 
-
-MESSAGE = Permission(_message)
+仅在需要同时捕获不同类型事件时使用，优先使用 message type 的 Matcher。
 """
-- **说明**: 匹配任意 ``message`` 类型事件，仅在需要同时捕获不同类型事件时使用。优先使用 message type 的 Matcher。
+NOTICE: Permission = Permission(Notice())
+"""匹配任意 `notice` 类型事件
+
+仅在需要同时捕获不同类型事件时使用，优先使用 notice type 的 Matcher。
 """
-NOTICE = Permission(_notice)
+REQUEST: Permission = Permission(Request())
+"""匹配任意 `request` 类型事件
+
+仅在需要同时捕获不同类型事件时使用，优先使用 request type 的 Matcher。
 """
-- **说明**: 匹配任意 ``notice`` 类型事件，仅在需要同时捕获不同类型事件时使用。优先使用 notice type 的 Matcher。
-"""
-REQUEST = Permission(_request)
-"""
-- **说明**: 匹配任意 ``request`` 类型事件，仅在需要同时捕获不同类型事件时使用。优先使用 request type 的 Matcher。
-"""
-METAEVENT = Permission(_metaevent)
-"""
-- **说明**: 匹配任意 ``meta_event`` 类型事件，仅在需要同时捕获不同类型事件时使用。优先使用 meta_event type 的 Matcher。
+METAEVENT: Permission = Permission(MetaEvent())
+"""匹配任意 `meta_event` 类型事件
+
+仅在需要同时捕获不同类型事件时使用，优先使用 meta_event type 的 Matcher。
 """
 
 
-def USER(*user: str, perm: Optional[Permission] = None):
-    """
-    :说明:
+class SuperUser:
+    """检查当前事件是否是消息事件且属于超级管理员"""
 
-      ``event`` 的 ``session_id`` 在白名单内且满足 perm
+    __slots__ = ()
 
-    :参数:
+    def __repr__(self) -> str:
+        return "Superuser()"
 
-      * ``*user: str``: 白名单
-      * ``perm: Optional[Permission]``: 需要同时满足的权限
-    """
-
-    async def _user(bot: "Bot", event: "Event") -> bool:
-        return bool(event.get_session_id() in user and
-                    (perm is None or await perm(bot, event)))
-
-    return Permission(_user)
-
-
-async def _superuser(bot: "Bot", event: "Event") -> bool:
-    return (event.get_type() == "message" and
-            event.get_user_id() in bot.config.superusers)
+    async def __call__(self, bot: Bot, event: Event) -> bool:
+        try:
+            user_id = event.get_user_id()
+        except Exception:
+            return False
+        return (
+            f"{bot.adapter.get_name().split(maxsplit=1)[0].lower()}:{user_id}"
+            in bot.config.superusers
+            or user_id in bot.config.superusers  # 兼容旧配置
+        )
 
 
-SUPERUSER = Permission(_superuser)
-"""
-- **说明**: 匹配任意超级用户消息类型事件
-"""
+SUPERUSER: Permission = Permission(SuperUser())
+"""匹配任意超级用户事件"""
+
+__autodoc__ = {
+    "Permission": True,
+    "Permission.__call__": True,
+    "User": True,
+    "USER": True,
+}
